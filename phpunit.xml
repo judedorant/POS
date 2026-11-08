@@ -1,0 +1,5 @@
+<?xml version="1.0"?>
+<phpunit bootstrap="vendor/autoload.php" colors="true">
+<testsuites><testsuite name="Feature"><directory>tests/Feature</directory></testsuite></testsuites>
+<php><env name="BROADCAST_CONNECTION" value="reverb"/><env name="REVERB_APP_ID" value="test"/><env name="REVERB_APP_KEY" value="test-key"/><env name="REVERB_APP_SECRET" value="test-secret"/><env name="APP_ENV" value="testing"/><env name="APP_KEY" value="base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="/><env name="SESSION_DRIVER" value="array"/><env name="CACHE_STORE" value="array"/></php>
+</phpunit>

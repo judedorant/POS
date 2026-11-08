@@ -1,0 +1,47 @@
+import {test,expect} from '@playwright/test'
+test('cashier completes a sale offline, reloads, and synchronizes exactly once',async({page,context})=>{
+ await page.goto('/')
+ await page.getByLabel('Email',{exact:true}).fill('browser@example.com')
+ await page.getByLabel('Password',{exact:true}).fill('browser-test-password')
+ await page.getByRole('button',{name:'Sign in',exact:true}).click()
+ await expect(page.getByText('Hello, Browser Cashier')).toBeVisible()
+ const ids=await page.evaluate(async()=>{
+  async function post(path:string,body:unknown){const cookie=document.cookie.split('; ').find(c=>c.startsWith('XSRF-TOKEN='));const response=await fetch(path,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','Accept':'application/json','X-XSRF-TOKEN':decodeURIComponent(cookie?.split('=').slice(1).join('=')??'')},body:JSON.stringify(body)});if(!response.ok)throw new Error(await response.text());return response.json()}
+  const slug='browser-'+crypto.randomUUID();const tenant=await post('/api/v1/tenants',{name:slug,slug,timezone:'UTC',default_currency:'USD'});const base=`/api/v1/tenants/${tenant.id}`
+  await post(base+'/products',{name:'Offline Coffee',sku:'COFFEE',sale_price_minor:250})
+  const warehouse=await post(base+'/warehouses',{name:'Main Store',code:'MAIN'})
+  return {tenant:tenant.id,name:slug,warehouse:warehouse.id}
+ })
+ // Reload the tenant list through normal session restoration.
+ await page.reload()
+ await page.getByRole('button',{name:new RegExp(ids.name)}).click()
+ const panel=page.locator('section').filter({has:page.getByRole('heading',{name:'Offline register'})}).last()
+ await panel.getByLabel('Offline warehouse').selectOption(ids.warehouse)
+ await panel.getByRole('button',{name:'Prepare / refresh offline catalog'}).click()
+ await expect(panel.getByText(/1 cached products/)).toBeVisible()
+ await page.evaluate(async()=>{await navigator.serviceWorker.ready;if(!navigator.serviceWorker.controller)await new Promise<void>(resolve=>navigator.serviceWorker.addEventListener('controllerchange',()=>resolve(),{once:true}))})
+ await context.setOffline(true)
+ await page.reload()
+ await expect(panel.getByText(/1 cached products/)).toBeVisible()
+ await panel.getByRole('button',{name:/Offline Coffee/}).click()
+ await panel.getByLabel('Cash received in minor units').fill('500')
+ await page.evaluate(()=>{const original=IDBObjectStore.prototype.add;(window as any).__restoreAdd=()=>{IDBObjectStore.prototype.add=original};IDBObjectStore.prototype.add=function(...args:Parameters<IDBObjectStore['add']>){if(this.name==='orders')throw new DOMException('Storage quota test','QuotaExceededError');return original.apply(this,args)}})
+ await panel.getByRole('button',{name:'Complete locally',exact:true}).click()
+ await expect(panel.getByRole('alert')).toContainText('Storage quota test')
+ await expect(panel.getByLabel('Cash received in minor units')).toHaveValue('500')
+ await page.evaluate(()=>{(window as any).__restoreAdd()})
+ await panel.getByRole('button',{name:'Complete locally',exact:true}).click()
+ await expect(panel.getByText(/Completed locally/)).toBeVisible()
+ await page.reload()
+ await expect(panel.locator('summary').filter({hasText:'pending'})).toHaveCount(1)
+ let lostResponse=false
+ await page.route('**/sync/orders',async route=>{if(!lostResponse){lostResponse=true;await route.fetch();await route.abort('failed')}else await route.continue()})
+ await context.setOffline(false)
+ await panel.getByRole('button',{name:'Sync now'}).click()
+ await expect(panel.getByText('Sync unavailable. Local sales are retained and will retry.')).toBeVisible()
+ await panel.getByRole('button',{name:'Sync now'}).click()
+ await expect(panel.locator('summary').filter({hasText:'already processed'})).toHaveCount(1)
+ await panel.getByRole('button',{name:'Sync now'}).click()
+ const total=await page.evaluate(async(tenant)=>{const r=await fetch(`/api/v1/tenants/${tenant}/orders`,{headers:{Accept:'application/json'}});return (await r.json()).total},ids.tenant)
+ expect(total).toBe(1)
+})

@@ -1,0 +1,92 @@
+name: tenant-pos
+x-runtime: &runtime
+  image: ${POS_IMAGE:?Set POS_IMAGE}
+  env_file: ./state/runtime.env
+  environment:
+    NO_PROXY: reverb,db,localhost,127.0.0.1
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp:mode=1777]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  volumes: [./state/certs/ca.crt:/run/db-ca.crt:ro]
+  depends_on:
+    db: {condition: service_healthy}
+  networks: [backend]
+services:
+  app:
+    <<: *runtime
+    healthcheck:
+      test: [CMD-SHELL, 'SCRIPT_FILENAME=/app/public/index.php SCRIPT_NAME=/index.php REQUEST_URI=/readyz REQUEST_METHOD=GET SERVER_NAME=localhost SERVER_PORT=9000 cgi-fcgi -bind -connect 127.0.0.1:9000 | grep -q ready']
+      interval: 30s
+      timeout: 10s
+      retries: 3
+  reverb:
+    <<: *runtime
+    command: [php, artisan, reverb:start, --host=0.0.0.0, --port=8080]
+  payments:
+    <<: *runtime
+    command: [php, artisan, queue:work, database, --queue=payments, --sleep=1, --tries=3, --timeout=60, --max-time=3600]
+    stop_grace_period: 75s
+  realtime:
+    <<: *runtime
+    command: [php, artisan, queue:work, database, --queue=realtime, --sleep=1, --tries=3, --timeout=60, --max-time=3600]
+    stop_grace_period: 75s
+  scheduler:
+    <<: *runtime
+    command: [php, artisan, schedule:work]
+    stop_grace_period: 75s
+  migrate:
+    <<: *runtime
+    profiles: [tools]
+    restart: "no"
+    environment:
+      DB_USERNAME: pos_migrator
+      DB_PASSWORD: ${MIGRATOR_DB_PASSWORD:?Set migrator password}
+    command: [php, artisan, migrate, --force]
+  web:
+    image: ${POS_WEB_IMAGE:?Set POS_WEB_IMAGE}
+    environment: {POS_DOMAIN: '${POS_DOMAIN:?Set domain}', NO_PROXY: 'app,reverb,localhost,127.0.0.1'}
+    ports: ['80:80', '443:443']
+    volumes: [caddy_data:/data, caddy_config:/config]
+    restart: unless-stopped
+    depends_on: {app: {condition: service_healthy}}
+    networks: [backend]
+  db:
+    image: postgres:17-bookworm
+    environment:
+      POSTGRES_USER: pos_admin
+      POSTGRES_DB: pos
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set admin password}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD:?Set app password}
+      MIGRATOR_DB_PASSWORD: ${MIGRATOR_DB_PASSWORD:?Set migrator password}
+      BACKUP_DB_PASSWORD: ${BACKUP_DB_PASSWORD:?Set backup password}
+    command: [postgres, -c, ssl=on, -c, ssl_cert_file=/run/db/server.crt, -c, ssl_key_file=/run/db/server.key]
+    volumes: [postgres:/var/lib/postgresql/data, ./init-db.sh:/docker-entrypoint-initdb.d/01-roles.sh:ro, ./state/certs:/run/db:ro]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U pos_admin -d pos']
+      interval: 5s
+      retries: 20
+    restart: unless-stopped
+    networks: [backend]
+  backup:
+    image: tenant-pos-backup:release-001
+    profiles: [tools]
+    environment:
+      PGHOST: db
+      PGDATABASE: pos
+      PGUSER: pos_backup
+      PGPASSWORD: ${BACKUP_DB_PASSWORD:?Set backup password}
+      PGSSLMODE: verify-full
+      PGSSLROOTCERT: /run/db-ca.crt
+      AGE_RECIPIENT: ${AGE_RECIPIENT:?Set age public recipient}
+    volumes: [./state/certs/ca.crt:/run/db-ca.crt:ro, ./state/backups:/backups]
+    networks: [backend]
+    read_only: true
+    tmpfs: [/tmp:mode=1777]
+networks:
+  backend:
+volumes:
+  postgres:
+  caddy_data:
+  caddy_config:

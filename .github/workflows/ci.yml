@@ -1,0 +1,85 @@
+name: POS checks
+on: [push, pull_request]
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: testing
+          POSTGRES_DB: pos_test
+        ports: ['5432:5432']
+        options: --health-cmd pg_isready --health-interval 5s --health-retries 10
+    env:
+      APP_ENV: testing
+      DB_CONNECTION: pgsql
+      DB_HOST: 127.0.0.1
+      DB_DATABASE: pos_test
+      DB_USERNAME: postgres
+      DB_PASSWORD: testing
+      VITE_REVERB_APP_KEY: pos-test-key
+      VITE_REVERB_HOST: localhost
+      VITE_REVERB_PORT: '8080'
+      VITE_REVERB_SCHEME: http
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: pdo_pgsql, mbstring, dom, xml, xmlwriter, pcntl
+      - run: composer install --no-interaction --prefer-dist
+      - run: vendor/bin/phpunit
+      - run: php tests/Concurrency/inventory.php
+      - run: php tests/Concurrency/checkout.php
+      - run: php tests/Concurrency/refunds.php
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium
+      - name: Offline recovery and live two-till updates
+        env:
+          BROADCAST_CONNECTION: reverb
+          REVERB_APP_ID: pos-test
+          REVERB_APP_KEY: pos-test-key
+          REVERB_APP_SECRET: pos-test-secret
+          REVERB_HOST: 127.0.0.1
+          REVERB_PORT: '8080'
+          REVERB_SCHEME: http
+          REVERB_ALLOWED_ORIGINS: localhost,127.0.0.1
+          QUEUE_CONNECTION: database
+          APP_ENV: local
+          APP_KEY: base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+          APP_URL: http://localhost:8880
+          SESSION_DRIVER: file
+          CACHE_STORE: file
+          SANCTUM_STATEFUL_DOMAINS: localhost:8880
+        run: |
+          php tests/Browser/seed.php
+          php artisan reverb:start --host=0.0.0.0 --port=8080 > /tmp/pos-reverb.log 2>&1 &
+          php artisan queue:work database --queue=payments,realtime --sleep=1 --tries=3 --timeout=60 > /tmp/pos-worker.log 2>&1 &
+          php artisan schedule:run > /tmp/pos-scheduler-first.log 2>&1 &
+          php artisan schedule:work > /tmp/pos-scheduler.log 2>&1 &
+          php artisan serve --host=0.0.0.0 --port=8880 > /tmp/pos-browser-server.log 2>&1 &
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://localhost:8880/up > /dev/null; then break; fi
+            sleep 1
+          done
+          npx playwright test
+
+  production-images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production artifacts without credentials
+        run: |
+          docker build -f deploy/Dockerfile --target runtime --build-arg VITE_REVERB_APP_KEY=ci-public --build-arg VITE_REVERB_HOST=pos.example.com -t tenant-pos:ci .
+          docker build -f deploy/Dockerfile --target web --build-arg VITE_REVERB_APP_KEY=ci-public --build-arg VITE_REVERB_HOST=pos.example.com -t tenant-pos-web:ci .
+          docker build -f deploy/backup.Dockerfile -t tenant-pos-backup:ci .
+          docker run --rm --entrypoint sh tenant-pos:ci -ec 'test "$(id -u)" = 10001; test ! -e .env; test ! -d deploy/state; test ! -d vendor/phpunit; php -m | grep pdo_pgsql'
+          docker run --rm -e POS_DOMAIN --entrypoint caddy tenant-pos-web:ci validate --config /etc/caddy/Caddyfile --adapter caddyfile
+        env:
+          POS_DOMAIN: pos.example.com

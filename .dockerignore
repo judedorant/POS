@@ -1,0 +1,17 @@
+.git
+.env*
+**/*.env
+**/*.pem
+**/*.key
+deploy/state
+vendor
+node_modules
+storage
+bootstrap/cache/*.php
+public/build
+public/sw.js
+public/hot
+test-results
+.phpunit.result.cache
+
+**/__pycache__

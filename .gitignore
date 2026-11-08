@@ -1,0 +1,15 @@
+/vendor/
+/.env
+/storage/**/*.log
+/bootstrap/cache/*.php
+node_modules/
+public/build/
+public/hot
+.phpunit.cache/
+public/sw.js
+test-results/
+playwright-report/
+
+/deploy/state/
+*.dump
+*.dump.age
